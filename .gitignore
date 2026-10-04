@@ -1,13 +1,25 @@
-.env
-.env.*
-!.env.example
+# 依赖与构建产物
 node_modules/
-.venv/
-__pycache__/
-target/
 dist/
 build/
 *.log
+
+# 本地环境
+.env
+.env.*
+!.env.example
+
+# SQLite 数据库
+*.db
+*.db-journal
+
+# 上传的封签照片（保留目录）
+server/uploads/*
+!server/uploads/.gitkeep
+
+.venv/
+__pycache__/
+target/
 .claude/
 .cc-workbench/
 轨迹/

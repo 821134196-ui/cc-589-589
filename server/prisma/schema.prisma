@@ -1,0 +1,118 @@
+// 社区水井水质采样与送检批次系统 - 数据模型
+// 注意：Prisma 的 SQLite provider 不支持 enum，状态/角色用 String + 应用层常量约束
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 用户：SAMPLER 采样员 / COURIER 送检员 / SUPERVISOR 负责人 / LAB 实验室（本地模拟）
+model User {
+  id            Int           @id @default(autoincrement())
+  username      String        @unique
+  name          String
+  role          String // SAMPLER | COURIER | SUPERVISOR | LAB
+  canPublish    Boolean       @default(false) // 是否获授权发布公告
+  createdAt     DateTime      @default(now())
+  sampledSamples Sample[]     @relation("sampler")
+  handoversFrom Handover[]    @relation("handoverFrom")
+  handoversTo   Handover[]    @relation("handoverTo")
+  announcements Announcement[]
+}
+
+// 水井点位
+model Well {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String
+  latitude  Float
+  longitude Float
+  address   String?
+  samples   Sample[]
+}
+
+// 样品批次。封签破损/退样/复测时旧样品保留（INVALIDATED/REJECTED），
+// 新样品通过 replacesId 关联旧样品，绝不覆盖旧记录。
+model Sample {
+  id            Int           @id @default(autoincrement())
+  containerNo   String        @unique // 容器编号必须唯一
+  wellId        Int
+  well          Well          @relation(fields: [wellId], references: [id])
+  samplerId     Int
+  sampler       User          @relation("sampler", fields: [samplerId], references: [id])
+  sampledAt     DateTime // 取样时间
+  weather       String? // 现场条件
+  waterTemp     Float?
+  turbidity     Float?
+  notes         String?
+  sealPhotoPath String? // 封签照片（本地存储路径）
+  // REGISTERED 已登记 / PICKED_UP 送检途中 / DELIVERED 已送达 / LAB_RECEIVED 实验室已接收
+  // REJECTED 实验室退样 / RESULT_RETURNED 结果已回传 / RETEST_REQUESTED 待复测
+  // PUBLISHED 已公告 / ARCHIVED 已归档 / INVALIDATED 已作废(封签破损)
+  status        String        @default("REGISTERED")
+  rejectReason  String?
+  replacesId    Int? // 本样品替代的旧样品（重新采样时）
+  replaces      Sample?       @relation("sampleReplacement", fields: [replacesId], references: [id])
+  replacedBy    Sample[]      @relation("sampleReplacement")
+  reviewedById  Int? // 负责人审核人
+  reviewedAt    DateTime?
+  reviewNote    String?
+  handovers     Handover[]
+  labResults    LabResult[]
+  announcements Announcement[]
+  createdAt     DateTime      @default(now())
+}
+
+// 交接记录（监管链）：每个样品按 seq 1→2→3 顺序办理，不可跳步
+model Handover {
+  id          Int      @id @default(autoincrement())
+  sampleId    Int
+  sample      Sample   @relation(fields: [sampleId], references: [id])
+  seq         Int // 1 采样→送检 / 2 送检→实验室 / 3 实验室接收确认
+  type        String // SAMPLER_TO_COURIER | COURIER_TO_LAB | LAB_RECEIVE
+  fromUserId  Int
+  fromUser    User     @relation("handoverFrom", fields: [fromUserId], references: [id])
+  toUserId    Int
+  toUser      User     @relation("handoverTo", fields: [toUserId], references: [id])
+  sealIntact  Boolean // 封签是否完好
+  coldChainOk Boolean? // 冷藏要求是否满足
+  temperature Float? // 冷藏温度 ℃
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  @@unique([sampleId, seq])
+}
+
+// 实验室结果。更正时新增版本并指向旧结果，旧结果保留不覆盖。
+model LabResult {
+  id              Int         @id @default(autoincrement())
+  sampleId        Int
+  sample          Sample      @relation(fields: [sampleId], references: [id])
+  version         Int
+  parameters      String // JSON 字符串：pH/浊度/余氯/菌群等
+  conclusion      String // NORMAL | ABNORMAL
+  correctedFromId Int? // 更正自哪个旧版本
+  correctedFrom   LabResult?  @relation("correction", fields: [correctedFromId], references: [id])
+  corrections     LabResult[] @relation("correction")
+  correctionNote  String?
+  operator        String?
+  returnedAt      DateTime    @default(now())
+}
+
+// 居民公告：仅获授权人员可发布；结果被更正时旧公告标记 SUPERSEDED 保留
+model Announcement {
+  id            Int      @id @default(autoincrement())
+  sampleId      Int
+  sample        Sample   @relation(fields: [sampleId], references: [id])
+  resultId      Int // 发布时依据的结果版本
+  title         String
+  content       String
+  status        String   @default("PUBLISHED") // PUBLISHED | SUPERSEDED
+  publishedById Int
+  publishedBy   User     @relation(fields: [publishedById], references: [id])
+  publishedAt   DateTime @default(now())
+}

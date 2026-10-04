@@ -1,0 +1,12 @@
+{
+  "name": "well-water-quality-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "社区水井水质采样与送检批次系统（NestJS + Prisma + SQLite + React）",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "start": "node scripts/start.mjs",
+    "dev": "node scripts/start.mjs",
+    "demo": "node scripts/demo.mjs"
+  }
+}

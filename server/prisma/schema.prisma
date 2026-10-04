@@ -1,0 +1,178 @@
+// 社区水井水质采样与送检批次系统
+// 设计原则：所有关键记录只追加不覆盖；更正/退样产生新版本，旧版本保留。
+// 注意：Prisma 的 SQLite 连接器不支持 enum，状态字段用 String，取值见各常量注释
+// （常量定义在 src/domain.ts）。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- 人员 ----------
+
+model User {
+  id           String   @id @default(cuid())
+  login        String   @unique
+  name         String
+  roles        String   // JSON 数组，如 ["SAMPLER","ANNOUNCER"]
+  createdAt    DateTime @default(now())
+
+  collected     Sample[]       @relation("SamplerSamples")
+  performedBy   Handover[]     @relation("HandoverActor")
+  releasedBy    Handover[]     @relation("ReleaseApprover")
+  labOperator   LabResult[]    @relation("LabOperator")
+  decidedBy     Decision[]     @relation("DecisionOfficial")
+  announcements Announcement[]
+}
+
+// ---------- 井位 ----------
+
+model Well {
+  id        String   @id @default(cuid())
+  code      String   @unique // 井号，如 W-01
+  name      String
+  address   String
+  // 点位图坐标（SVG 0-100 的相对坐标）
+  posX      Float
+  posY      Float
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  samples     Sample[]
+  announcements Announcement[]
+}
+
+// ---------- 样品（一次采样一个批次容器） ----------
+// status:
+// COLLECTED  已采样，待送检
+// IN_TRANSIT 送检交接完成，在途/待实验室签收
+// RECEIVED   实验室签收
+// REJECTED   实验室退样（封签破损/温控不达标）
+// TESTED     已出结果，待负责人决定
+// RELEASED   负责人已放行
+// RETESTING  负责人要求复测
+// ARCHIVED   已归档（异常须先复测）
+// VOID       作废（封签破损不可恢复）
+model Sample {
+  id                  String   @id @default(cuid())
+  wellId              String
+  well                Well     @relation(fields: [wellId], references: [id])
+  containerCode       String   @unique // 容器编号，全局唯一
+  batchNo             String   @unique // 批次号
+  sampledAt           DateTime // 取样时间
+  collectedById       String
+  collectedBy         User     @relation("SamplerSamples", fields: [collectedById], references: [id])
+  // 现场条件
+  weather             String
+  waterTempC          Float
+  chlorineSmell       Boolean  @default(false)
+  visualNote          String
+  // 封签
+  sealCode            String // 封签编号
+  sealPhotoPath       String // 封签照片本地存放路径
+  sealIntactAtCollect Boolean @default(true)
+  coldChainRequired   Boolean @default(true)
+  // 复测链：retestOf 指向被复测的原样品
+  retestOfId          String?  @unique
+  retestOf            Sample?  @relation("RetestChain", fields: [retestOfId], references: [id])
+  retest              Sample?  @relation("RetestChain")
+  status              String   @default("COLLECTED")
+  createdAt           DateTime @default(now())
+
+  handovers     Handover[]
+  results       LabResult[]
+  decisions     Decision[]
+  announcements Announcement[]
+
+  @@index([wellId, sampledAt])
+}
+
+// ---------- 交接记录（按实际顺序追加，不可修改） ----------
+// type:
+// SEND_TO_LAB 采样员 → 送检人员（核封签、启运）
+// LAB_RECEIVE 送检人员 → 实验室（签收）
+// LAB_REJECT  实验室退样
+// RELEASE     放行（批准人批准进入公告/归档环节）
+model Handover {
+  id          String    @id @default(cuid())
+  sampleId    String
+  sample      Sample    @relation(fields: [sampleId], references: [id])
+  seq         Int // 同一容器的交接序号，从 1 起，严格递增
+  type        String
+  fromUserId  String?
+  fromUser    User?     @relation("HandoverActor", fields: [fromUserId], references: [id])
+  // 放行时的批准人
+  approverId  String?
+  approver    User?     @relation("ReleaseApprover", fields: [approverId], references: [id])
+  sealIntact  Boolean
+  coldChainOk Boolean?
+  note        String
+  occurredAt  DateTime  @default(now())
+
+  @@unique([sampleId, seq])
+  @@index([sampleId, seq])
+}
+
+// ---------- 实验室结果（版本化，更正不覆盖原结果） ----------
+// conclusion: QUALIFIED 合格 / ABNORMAL 异常（需复测后才能归档）
+model LabResult {
+  id             String   @id @default(cuid())
+  sampleId       String
+  sample         Sample   @relation(fields: [sampleId], references: [id])
+  version        Int // 结果版本，从 1 起
+  isCurrent      Boolean  @default(true)
+  // 检测指标 JSON: {ph, turbidityNTU, coliformMPN, residualCl}
+  indicators     String
+  conclusion     String
+  qualified      Boolean
+  abnormalItem   String?
+  testedAt       DateTime
+  recordedById   String
+  recordedBy     User     @relation("LabOperator", fields: [recordedById], references: [id])
+  correctionNote String?
+  createdAt      DateTime @default(now())
+
+  decisions Decision[]
+
+  @@unique([sampleId, version])
+}
+
+// ---------- 负责人决定 ----------
+// type: PUBLISH 同意发布公告 / RETEST 要求复测 / ARCHIVE 归档
+model Decision {
+  id         String   @id @default(cuid())
+  sampleId   String
+  sample     Sample   @relation(fields: [sampleId], references: [id])
+  resultId   String?
+  result     LabResult? @relation(fields: [resultId], references: [id])
+  type       String
+  reason     String
+  officialId String
+  official   User     @relation("DecisionOfficial", fields: [officialId], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@index([sampleId, createdAt])
+}
+
+// ---------- 居民公告（只允许授权人发布；撤回保留记录） ----------
+
+model Announcement {
+  id            String    @id @default(cuid())
+  sampleId      String
+  sample        Sample    @relation(fields: [sampleId], references: [id])
+  wellId        String
+  well          Well      @relation(fields: [wellId], references: [id])
+  title         String
+  body          String
+  publishedById String
+  publishedBy   User      @relation(fields: [publishedById], references: [id])
+  publishedAt   DateTime  @default(now())
+  withdrawn     Boolean   @default(false)
+  withdrawnAt   DateTime?
+
+  @@index([wellId])
+}
